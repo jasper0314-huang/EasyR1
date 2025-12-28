@@ -470,29 +470,32 @@ class FSDPWorker(Worker):
             min_pixels = data.meta_info["min_pixels"]
             max_pixels = data.meta_info["max_pixels"]
             video_fps = data.meta_info["video_fps"]
+            video_min_pixels = data.meta_info["video_min_pixels"]
+            video_max_pixels = data.meta_info["video_max_pixels"]
+            video_maxlen = data.meta_info["video_maxlen"]
             batch_multi_modal_inputs = []
             multi_modal_inputs_cache = {}  # avoid repeated processing for n > 1 samples
             for index, multi_modal_data in zip(
                 data.non_tensor_batch["uid"], data.non_tensor_batch["multi_modal_data"]
             ):  # process multi modal data per sample
                 if index not in multi_modal_inputs_cache:
-                    images, videos = [], []
-                    if "images" in multi_modal_data:
+                    images, videos = None, None
+                    if "images" in multi_modal_data and len(multi_modal_data["images"]) != 0:
+                        images = []
                         for image in multi_modal_data["images"]:
                             images.append(process_image(image, min_pixels, max_pixels))
 
-                    if "videos" in multi_modal_data:
+                    if "videos" in multi_modal_data and len(multi_modal_data["videos"]) != 0:
+                        videos = []
                         for video in multi_modal_data["videos"]:
-                            videos.append(process_video(video, min_pixels, max_pixels, video_fps))
+                            videos.append(process_video(video, video_min_pixels, video_max_pixels, video_fps, video_maxlen))
 
-                    if len(images) != 0:
+                    if images is not None or videos is not None:
                         # it's necessary to add `dict` to properly convert batch features to dict
                         # otherwise the batch features will be converted to dict keys
                         # see https://github.com/hiyouga/EasyR1/pull/339
-                        multi_modal_inputs = dict(self.processor.image_processor(images=images, return_tensors="pt"))
-                    elif len(videos) != 0:
                         multi_modal_inputs = dict(
-                            self.processor.image_processor(images=None, videos=videos, return_tensors="pt")
+                            self.processor.image_processor(images=images, videos=videos, return_tensors="pt")
                         )
                     else:
                         multi_modal_inputs = {}

@@ -53,6 +53,9 @@ class DataConfig:
     seed: int = 1
     min_pixels: Optional[int] = 262144
     max_pixels: Optional[int] = 4194304
+    video_min_pixels: Optional[int] = 16384
+    video_max_pixels: Optional[int] = 65536
+    video_maxlen: int = 16
     filter_overlong_prompts: bool = True
     filter_overlong_prompts_workers: int = 16
 

@@ -39,6 +39,9 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         format_prompt=config.format_prompt,
         min_pixels=config.min_pixels,
         max_pixels=config.max_pixels,
+        video_min_pixels=config.video_min_pixels,
+        video_max_pixels=config.video_max_pixels,
+        video_maxlen=config.video_maxlen,
         filter_overlong_prompts=config.filter_overlong_prompts,
         filter_overlong_prompts_workers=config.filter_overlong_prompts_workers,
     )
@@ -80,6 +83,9 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         format_prompt=config.format_prompt,
         min_pixels=config.min_pixels,
         max_pixels=config.max_pixels,
+        video_min_pixels=config.video_min_pixels,
+        video_max_pixels=config.video_max_pixels,
+        video_maxlen=config.video_maxlen,
         filter_overlong_prompts=config.filter_overlong_prompts,
     )
 

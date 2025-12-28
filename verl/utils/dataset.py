@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import math
 import os
 from collections import defaultdict
@@ -78,9 +79,13 @@ def process_image(
 
 
 def process_video(
-    video: str, min_pixels: Optional[int], max_pixels: Optional[int], video_fps: float, return_fps: bool = False
+    video: str, min_pixels: Optional[int], max_pixels: Optional[int], video_fps: Optional[float], video_maxlen: Optional[int], return_fps: bool = False
 ) -> Union[list[ImageObject], tuple[list[ImageObject], list[float]]]:
     vision_info = {"video": video, "min_pixels": min_pixels, "max_pixels": max_pixels, "fps": video_fps}
+    if video_maxlen is not None and max_pixels is not None:
+        vision_info["total_pixels"] = video_maxlen * max_pixels
+    else:
+        vision_info["total_pixels"] = None
     return fetch_video(vision_info, return_video_sample_fps=return_fps)
 
 
@@ -105,6 +110,9 @@ class RLHFDataset(Dataset):
         format_prompt: Optional[str] = None,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        video_min_pixels: Optional[int] = None,
+        video_max_pixels: Optional[int] = None,
+        video_maxlen: Optional[int] = None,
         filter_overlong_prompts: bool = True,
         filter_overlong_prompts_workers: int = 16,
     ):
@@ -120,6 +128,9 @@ class RLHFDataset(Dataset):
         self.truncation = truncation
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
+        self.video_min_pixels = video_min_pixels
+        self.video_max_pixels = video_max_pixels
+        self.video_maxlen = video_maxlen
 
         if "@" in data_path:
             data_path, data_split = data_path.split("@")
@@ -155,56 +166,49 @@ class RLHFDataset(Dataset):
             format_prompt = Template(self.format_prompt.strip())
             prompt_str = format_prompt.render(content=prompt_str)
 
-        if self.image_key in example:
-            # https://huggingface.co/docs/transformers/en/tasks/image_text_to_text
+        if self.image_key in example or self.video_key in example:
+            num_images, num_videos = 0, 0
             content_list = []
-            for i, content in enumerate(prompt_str.split("<image>")):
-                if i != 0:
+            for part in re.split(r"(<image>|<video>)", prompt_str):
+                if len(part) == 0:
+                    continue
+                if part == "<image>":
+                    num_images += 1
                     content_list.append({"type": "image"})
-
-                if content:
-                    content_list.append({"type": "text", "text": content})
-
-            return [{"role": "user", "content": content_list}]
-        elif self.video_key in example:
-            content_list = []
-            for i, content in enumerate(prompt_str.split("<video>")):
-                if i != 0:
+                elif part == "<video>":
+                    num_videos += 1
                     content_list.append({"type": "video"})
+                else:
+                    content_list.append({"type": "text", "text": part})
 
-                if content:
-                    content_list.append({"type": "text", "text": content})
-
-            return [{"role": "user", "content": content_list}]
+            return [{"role": "user", "content": content_list}], num_images, num_videos
         else:
-            return [{"role": "user", "content": prompt_str}]
+            return [{"role": "user", "content": prompt_str}], 0, 0
 
     def _filter_overlong_prompts(self, example: dict[str, Any]) -> bool:
-        messages = self._build_messages(example)
-        if self.image_key in example:
+        messages, num_images, num_videos = self._build_messages(example)
+        if num_images > 0 or num_videos > 0:
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            images = example[self.image_key]
+            # Process images
+            images = example.get(self.image_key, [])
             if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):  # image paths
                 images = [os.path.join(self.image_dir, image) for image in images]
 
-            processed_images = [] if len(images) != 0 else None  # text-only data
+            processed_images = [] if len(images) != 0 else None
             for image in images:
                 processed_images.append(process_image(image, self.min_pixels, self.max_pixels))
 
-            model_inputs = self.processor(processed_images, [prompt], add_special_tokens=False, return_tensors="pt")
-            return model_inputs["input_ids"].size(-1) <= self.max_prompt_length
-        elif self.video_key in example:
-            prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            videos = example[self.video_key]
+            # Process videos
+            videos = example.get(self.video_key, [])
             if self.image_dir is not None and len(videos) != 0 and isinstance(videos[0], str):  # video paths
                 videos = [os.path.join(self.image_dir, video) for video in videos]
 
             processed_videos = [] if len(videos) != 0 else None  # text-only data
             for video in videos:
-                processed_videos.append(process_video(video, self.min_pixels, self.max_pixels, self.video_fps))
+                processed_videos.append(process_video(video, self.video_min_pixels, self.video_max_pixels, self.video_fps, self.video_maxlen))
 
             model_inputs = self.processor(
-                videos=processed_videos, text=[prompt], add_special_tokens=False, return_tensors="pt"
+                images=processed_images, videos=processed_videos, text=[prompt], add_special_tokens=False, return_tensors="pt"
             )
             return model_inputs["input_ids"].size(-1) <= self.max_prompt_length
         else:
@@ -216,47 +220,46 @@ class RLHFDataset(Dataset):
 
     def __getitem__(self, index):
         example: dict = self.dataset[index]
-        messages = self._build_messages(example)
-        example.pop(self.prompt_key, None)
+        messages, num_images, num_videos = self._build_messages(example)
 
-        if self.image_key in example:
+        # Pop the image and video keys here
+        images = example.pop(self.image_key, [])
+        videos = example.pop(self.video_key, [])
+        if len(images) != num_images or len(videos) != num_videos:
+            raise ValueError(f"Expected {num_images} images and {num_videos} videos, but got {len(images)} and {len(videos)}")
+
+        if len(images) != 0 or len(videos) != 0:
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            images = example.pop(self.image_key)
+            # Process images
             if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):  # image paths
                 images = [os.path.join(self.image_dir, image) for image in images]
 
-            processed_images = [] if len(images) != 0 else None  # text-only data
+            processed_images = [] if len(images) != 0 else None
             for image in images:
                 processed_images.append(process_image(image, self.min_pixels, self.max_pixels))
 
-            model_inputs = self.processor(processed_images, [prompt], add_special_tokens=False, return_tensors="pt")
-            input_ids = model_inputs.pop("input_ids")[0]
-            attention_mask = model_inputs.pop("attention_mask")[0]
-            example["multi_modal_data"] = {"images": images}
-        elif self.video_key in example:
-            prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            videos = example.pop(self.video_key)
+            # Process videos
             if self.image_dir is not None and len(videos) != 0 and isinstance(videos[0], str):  # video paths
                 videos = [os.path.join(self.image_dir, video) for video in videos]
 
-            processed_videos = [] if len(videos) != 0 else None  # text-only data
+            processed_videos = [] if len(videos) != 0 else None
             video_fps_list = []
             for video in videos:
                 processed_video, video_fps = process_video(
-                    video, self.min_pixels, self.max_pixels, self.video_fps, return_fps=True
+                    video, self.video_min_pixels, self.video_max_pixels, self.video_fps, self.video_maxlen, return_fps=True
                 )
                 processed_videos.append(processed_video)
                 video_fps_list.append(video_fps)
 
             model_inputs = self.processor(
-                videos=processed_videos, text=[prompt], add_special_tokens=False, return_tensors="pt"
+                images=processed_images, videos=processed_videos, text=[prompt], add_special_tokens=False, return_tensors="pt"
             )
             if "second_per_grid_ts" in self.processor.model_input_names:
                 model_inputs["second_per_grid_ts"] = [2.0 / video_sample_fps for video_sample_fps in video_fps_list]
 
             input_ids = model_inputs.pop("input_ids")[0]
             attention_mask = model_inputs.pop("attention_mask")[0]
-            example["multi_modal_data"] = {"videos": videos}
+            example["multi_modal_data"] = {"images": images, "videos": videos}
         else:
             prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             model_inputs = self.tokenizer([prompt], add_special_tokens=False, return_tensors="pt")

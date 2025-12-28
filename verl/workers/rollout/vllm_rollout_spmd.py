@@ -50,7 +50,8 @@ def _get_logit_bias(processor: Optional[ProcessorMixin]) -> Optional[dict[int, f
 
 
 def _process_multi_modal_data(
-    multi_modal_data: dict[str, Any], min_pixels: int, max_pixels: int, video_fps: float
+    multi_modal_data: dict[str, Any], min_pixels: int, max_pixels: int,
+    video_min_pixels: int, video_max_pixels: int, video_fps: float, video_maxlen: int,
 ) -> dict[str, Any]:
     # may convert image path to image object
     images, videos = [], []
@@ -60,7 +61,10 @@ def _process_multi_modal_data(
 
     if "videos" in multi_modal_data:
         for video in multi_modal_data["videos"]:
-            videos.append(process_video(video, min_pixels, max_pixels, video_fps))
+            videos.append(process_video(video, video_min_pixels, video_max_pixels, video_fps, video_maxlen))
+
+    if len(images) == 0 and len(videos) == 0:
+        raise ValueError("Mixed image and video data in one sample is not supported now.")
 
     if len(images) != 0:
         return {"image": images}
@@ -177,10 +181,13 @@ class vLLMRollout(BaseRollout):
                     {
                         "prompt_token_ids": list(raw_prompt_ids),
                         "multi_modal_data": _process_multi_modal_data(
-                            multi_modal_data,
-                            prompts.meta_info["min_pixels"],
-                            prompts.meta_info["max_pixels"],
-                            prompts.meta_info["video_fps"],
+                            multi_modal_data=multi_modal_data,
+                            min_pixels=prompts.meta_info["min_pixels"],
+                            max_pixels=prompts.meta_info["max_pixels"],
+                            video_min_pixels=prompts.meta_info["video_min_pixels"],
+                            video_max_pixels=prompts.meta_info["video_max_pixels"],
+                            video_fps=prompts.meta_info["video_fps"],
+                            video_maxlen=prompts.meta_info["video_maxlen"],
                         ),
                     }
                 )
